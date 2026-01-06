@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="sk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Offline Editor - Ukladanie v prehliadači</title>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--accent:#06b6d4;--muted:#94a3b8;--text:#e6eef6}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;background:linear-gradient(180deg,#071029 0%,#071a2a 100%);color:var(--text);min-height:100vh;display:flex;align-items:stretch}
+    .app{display:flex;width:100%;max-width:1200px;margin:auto;gap:18px;padding:24px}
+    .sidebar{width:320px;background:var(--card);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:12px}
+    .main{flex:1;background:rgba(255,255,255,0.03);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:12px}
+    h1{font-size:18px;margin:0 0 6px 0}
+    .controls{display:flex;gap:8px;flex-wrap:wrap}
+    button{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--text);padding:8px 10px;border-radius:8px;cursor:pointer}
+    button.primary{background:linear-gradient(90deg,var(--accent),#7dd3fc);color:#042027;border:none}
+    .list{overflow:auto;flex:1;padding:6px;border-radius:8px;background:linear-gradient(180deg,rgba(255,255,255,0.01),transparent)}
+    .doc{padding:8px;border-radius:8px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;border:1px solid rgba(255,255,255,0.02)}
+    .doc .meta{font-size:13px;color:var(--muted)}
+    textarea{flex:1;min-height:60vh;background:transparent;border:none;color:var(--text);resize:vertical;font-size:15px;padding:12px;outline:none}
+    .toolbar{display:flex;gap:8px;align-items:center}
+    .small{font-size:13px;color:var(--muted)}
+    .trash-list{max-height:160px;overflow:auto;margin-top:6px}
+    .footer{display:flex;justify-content:space-between;align-items:center;padding-top:8px;border-top:1px dashed rgba(255,255,255,0.03)}
+    .search{width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.03);background:transparent;color:var(--text)}
+    @media(max-width:880px){.app{flex-direction:column}.sidebar{width:100%}}
+  </style>
+</head>
+<body>
+  <div class="app" role="application" aria-label="Offline editor">
+    <aside class="sidebar" aria-label="Bočný panel">
+      <div>
+        <h1>Offline Editor</h1>
+        <div class="small">Ukladanie v prehliadači (localStorage)</div>
+      </div>
+
+      <div class="controls">
+        <button id="newBtn" class="primary">Nový dokument</button>
+        <button id="saveBtn">Uložiť teraz</button>
+        <button id="exportBtn">Export .txt</button>
+      </div>
+
+      <input id="search" class="search" placeholder="Hľadať dokumenty..." />
+
+      <div class="list" id="docList" aria-live="polite"></div>
+
+      <div style="margin-top:8px">
+        <div class="small">Kôš</div>
+        <div class="trash-list" id="trashList"></div>
+        <div class="footer">
+          <div class="small">Dokumenty: <span id="count">0</span></div>
+          <button id="emptyTrash">Vyprázdniť kôš</button>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="toolbar">
+        <input id="title" placeholder="Názov dokumentu" style="flex:1;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.03);background:transparent;color:var(--text)" />
+        <div class="small" id="status">Uložené</div>
+      </div>
+
+      <textarea id="editor" placeholder="Začni písať..."></textarea>
+
+      <div style="display:flex;gap:8px;align-items:center;justify-content:flex-end">
+        <button id="deleteBtn">Presunúť do koša</button>
+        <button id="restoreBtn">Obnoviť posledný</button>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    // Jednoduchý offline editor s localStorage
+    const STORAGE_KEY = 'offline_editor_docs_v1';
+    const TRASH_KEY = 'offline_editor_trash_v1';
+    const AUTO_SAVE_INTERVAL = 3000; // ms
+
+    const editor = document.getElementById('editor');
+    const titleInput = document.getElementById('title');
+    const docList = document.getElementById('docList');
+    const trashList = document.getElementById('trashList');
+    const status = document.getElementById('status');
+    const count = document.getElementById('count');
+    const search = document.getElementById('search');
+
+    let docs = load(STORAGE_KEY) || [];
+    let trash = load(TRASH_KEY) || [];
+    let currentId = null;
+    let autosaveTimer = null;
+
+    function load(key){ try { return JSON.parse(localStorage.getItem(key)) || []; } catch(e){ return []; } }
+    function save(key, data){ localStorage.setItem(key, JSON.stringify(data)); }
+
+    function renderList(filter=''){
+      docList.innerHTML = '';
+      const filtered = docs.filter(d => d.title.toLowerCase().includes(filter.toLowerCase()) || d.content.toLowerCase().includes(filter.toLowerCase()));
+      filtered.sort((a,b)=>b.updated-a.updated);
+      filtered.forEach(d=>{
+        const el = document.createElement('div'); el.className='doc';
+        const meta = document.createElement('div'); meta.innerHTML = `<strong>${escapeHtml(d.title||'Untitled')}</strong><div class="meta">${new Date(d.updated).toLocaleString()}</div>`;
+        const actions = document.createElement('div');
+        const openBtn = document.createElement('button'); openBtn.textContent='Otvoriť'; openBtn.onclick=()=>openDoc(d.id);
+        const delBtn = document.createElement('button'); delBtn.textContent='Kôš'; delBtn.onclick=()=>moveToTrash(d.id);
+        actions.appendChild(openBtn); actions.appendChild(delBtn);
+        el.appendChild(meta); el.appendChild(actions);
+        docList.appendChild(el);
+      });
+      count.textContent = docs.length;
+    }
+
+    function renderTrash(){
+      trashList.innerHTML = '';
+      trash.sort((a,b)=>b.deleted-a.deleted);
+      trash.forEach(t=>{
+        const el = document.createElement('div'); el.className='doc';
+        const meta = document.createElement('div'); meta.innerHTML = `<strong>${escapeHtml(t.title||'Untitled')}</strong><div class="meta">Vymazané: ${new Date(t.deleted).toLocaleString()}</div>`;
+        const actions = document.createElement('div');
+        const restoreBtn = document.createElement('button'); restoreBtn.textContent='Obnoviť'; restoreBtn.onclick=()=>restoreFromTrash(t.id);
+        const permBtn = document.createElement('button'); permBtn.textContent='Vymazať natrvalo'; permBtn.onclick=()=>permanentDelete(t.id);
+        actions.appendChild(restoreBtn); actions.appendChild(permBtn);
+        el.appendChild(meta); el.appendChild(actions);
+        trashList.appendChild(el);
+      });
+    }
+
+    function newDoc(){
+      if (editor.value.trim() || titleInput.value.trim()){
+        // uložiť ako nový dokument
+        const doc = { id: Date.now().toString(), title: titleInput.value.trim() || 'Untitled', content: editor.value, created: Date.now(), updated: Date.now() };
+        docs.push(doc); save(STORAGE_KEY, docs);
+      }
+      // vyčisti editor
+      currentId = null;
+      titleInput.value = '';
+      editor.value = '';
+      status.textContent = 'Prázdny dokument';
+      renderList(search.value);
+    }
+
+    function openDoc(id){
+      const d = docs.find(x=>x.id===id);
+      if(!d) return;
+      currentId = d.id;
+      titleInput.value = d.title;
+      editor.value = d.content;
+      status.textContent = 'Načítané';
+    }
+
+    function moveToTrash(id){
+      const idx = docs.findIndex(x=>x.id===id);
+      if(idx===-1) return;
+      const [d] = docs.splice(idx,1);
+      d.deleted = Date.now();
+      trash.push(d);
+      save(STORAGE_KEY, docs);
+      save(TRASH_KEY, trash);
+      if(currentId===id){ currentId=null; titleInput.value=''; editor.value=''; }
+      renderList(search.value); renderTrash();
+    }
+
+    function restoreFromTrash(id){
+      const idx = trash.findIndex(x=>x.id===id);
+      if(idx===-1) return;
+      const [d] = trash.splice(idx,1);
+      delete d.deleted;
+      d.updated = Date.now();
+      docs.push(d);
+      save(STORAGE_KEY, docs);
+      save(TRASH_KEY, trash);
+      renderList(search.value); renderTrash();
+    }
+
+    function permanentDelete(id){
+      const idx = trash.findIndex(x=>x.id===id);
+      if(idx===-1) return;
+      trash.splice(idx,1);
+      save(TRASH_KEY, trash);
+      renderTrash();
+    }
+
+    function emptyTrash(){
+      if(!confirm('Naozaj vyprázdniť kôš? Toto sa nedá vrátiť.')) return;
+      trash = [];
+      save(TRASH_KEY, trash);
+      renderTrash();
+    }
+
+    function saveNow(){
+      const content = editor.value;
+      const title = titleInput.value.trim();
+      if(currentId){
+        const d = docs.find(x=>x.id===currentId);
+        if(d){ d.content = content; d.title = title || d.title; d.updated = Date.now(); }
+      } else {
+        // ak je text prázdny, nič neukladaj
+        if(!content && !title) return;
+        const doc = { id: Date.now().toString(), title: title || 'Untitled', content, created: Date.now(), updated: Date.now() };
+        docs.push(doc);
+        currentId = doc.id;
+      }
+      save(STORAGE_KEY, docs);
+      status.textContent = 'Uložené ' + new Date().toLocaleTimeString();
+      renderList(search.value);
+    }
+
+    function autoSave(){
+      if(autosaveTimer) clearTimeout(autosaveTimer);
+      autosaveTimer = setTimeout(()=>{
+        saveNow();
+      }, AUTO_SAVE_INTERVAL);
+    }
+
+    function exportTxt(){
+      const text = editor.value || '';
+      const filename = (titleInput.value.trim() || 'document') + '.txt';
+      const blob = new Blob([text], {type:'text/plain;charset=utf-8'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click();
+      a.remove(); URL.revokeObjectURL(url);
+    }
+
+    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
+
+    // Eventy
+    document.getElementById('newBtn').addEventListener('click', ()=>{ if(confirm('Vytvoriť nový dokument? Aktuálny sa uloží ak obsahuje text.')) newDoc(); });
+    document.getElementById('saveBtn').addEventListener('click', ()=>{ saveNow(); });
+    document.getElementById('exportBtn').addEventListener('click', ()=>{ exportTxt(); });
+    document.getElementById('deleteBtn').addEventListener('click', ()=>{ if(confirm('Presunúť tento dokument do koša?')) { if(currentId) moveToTrash(currentId); else { alert('Dokument nie je uložený.'); } }});
+    document.getElementById('restoreBtn').addEventListener('click', ()=>{ if(trash.length) restoreFromTrash(trash[trash.length-1].id); else alert('Kôš je prázdny.'); });
+    document.getElementById('emptyTrash').addEventListener('click', emptyTrash);
+    search.addEventListener('input', ()=>renderList(search.value));
+
+    editor.addEventListener('input', ()=>{ status.textContent = 'Ukladám...'; autoSave(); });
+    titleInput.addEventListener('input', ()=>{ status.textContent = 'Ukladám...'; autoSave(); });
+
+    // Inicializácia
+    renderList();
+    renderTrash();
+
+    // Tip: ak chceš rýchlo vymazať všetko z localStorage (len pre tento editor):
+    // localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(TRASH_KEY);
+  </script>
+</body>
+</html>
